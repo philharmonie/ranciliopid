@@ -52,6 +52,7 @@ const int fallback = FALLBACK;
 const int triggerType = TRIGGERTYPE;
 const boolean ota = OTA;
 const int grafana = GRAFANA;
+const bool enableRelays = ENABLERELAYS;
 
 // Wifi
 const char* auth = AUTH;
@@ -75,8 +76,8 @@ const char* blynkaddress  = BLYNKADDRESS;
 ******************************************************/
 int pidON = 1 ;                 // 1 = control loop in closed loop
 int relayON, relayOFF;          // used for relay trigger type. Do not change!
-boolean kaltstart = true;       // true = Rancilio started for first time
-boolean emergencyStop = false;  // Notstop bei zu hoher Temperatur
+bool kaltstart = true;       // true = Rancilio started for first time
+bool emergencyStop = false;  // Notstop bei zu hoher Temperatur
 
 /********************************************************
    moving average - Brüherkennung
@@ -126,13 +127,13 @@ int brewswitch = 0;
 bool brewing = false;
 bool watering = false;
 bool steaming = false;
+bool multiplebutton = false;
 
-
-long brewtime = 25000;
+int preinfusion = PREINFUSION;
+int preinfusionpause = PREINFUSIONPAUSE;
+long brewtime = BREWTIME;
 long aktuelleZeit = 0;
 long totalbrewtime = 0;
-int preinfusion = 2000;
-int preinfusionpause = 5000;
 unsigned long bezugsZeit = 0;
 unsigned long startZeit = 0;
 
@@ -185,8 +186,9 @@ const long intervaltempmestsic = 400;
 const long intervaltempmesds18b20 = 400;
 const long intervalsteam = 500;
 const long intervalwater = 500;
-bool steamperiod = false;
-bool waterperiod = false;
+int brewperiod = 1;
+int steamperiod = 1;
+int waterperiod = 1;
 int pidMode = 1; //1 = Automatic, 0 = Manual
 
 const unsigned int windowSize = 1000;
@@ -196,6 +198,8 @@ double Input, Output, setPointTemp;  //
 double previousInput = 0;
 
 double setPoint = SETPOINT;
+double steamTemp = STEAMTEMP;
+double esTemp = ESTEMP;
 double aggKp = AGGKP;
 double aggTn = AGGTN;
 double aggTv = AGGTV;
@@ -213,8 +217,7 @@ double aggKi = 0;
 #else
 double aggKi = aggKp / aggTn;
 #endif
-double aggKd = aggTv * aggKp ;
-
+double aggKd = aggTv * aggKp;
 
 PID bPID(&Input, &Output, &setPoint, aggKp, aggKi, aggKd, PonE, DIRECT);
 
@@ -287,12 +290,14 @@ BLYNK_WRITE(V4) {
 BLYNK_WRITE(V5) {
   aggTn = param.asDouble();
 }
+
 BLYNK_WRITE(V6) {
   aggTv =  param.asDouble();
 }
 
 BLYNK_WRITE(V7) {
   setPoint = param.asDouble();
+  setPointTemp = param.asDouble();
 }
 
 BLYNK_WRITE(V8) {
@@ -338,18 +343,21 @@ BLYNK_WRITE(V34) {
   brewboarder =  param.asDouble();
 }
 
+BLYNK_WRITE(V40) {
+  steamTemp = param.asDouble();
+}
+
 
 /********************************************************
   Notstop wenn Temp zu hoch
 *****************************************************/
 void testEmergencyStop() {
-  if (Input > 130) {
+  if (Input > esTemp) {
     emergencyStop = true;
   } else if (Input < 100) {
     emergencyStop = false;
   }
 }
-
 
 /********************************************************
   Displayausgabe
@@ -516,30 +524,50 @@ void refreshTemp() {
 void switchDetection() {
   analogPinValue = analogRead(analogPin);
   if (analogPinValue > 1000) {
-    brewcounter = 0;
-    aktuelleZeit = 0;
-    bezugsZeit = 0;
-    brewing = false;
-    watering = false;
-    steaming = false;
-    digitalWrite(pinRelayVentil, relayOFF);
-    digitalWrite(pinRelayPumpe, relayOFF);
-  }
-  if (analogPinValue < 20) {
+    // Idle - no button pressed
+    multiplebutton = false;
+    reset();
+  } else if (analogPinValue < 20) {
     // Power butotn pressed
-  }
-  if (analogPinValue > 500 && analogPinValue < 600) {
+  } else if (analogPinValue > 530 && analogPinValue < 600) {
+    // Brew switch pressed
     brewing = true;
     brew();
-  }
-  if (analogPinValue > 700 && analogPinValue < 800) {
+  } else if (analogPinValue > 700 && analogPinValue < 800) {
+    // Water button pressed
     watering = true;
     hotwater();
-  }
-  if (analogPinValue > 850 && analogPinValue < 950) {
+  } else if (analogPinValue > 850 && analogPinValue < 950) {
+    // Steam button pressed
     steaming = true;
+    setPoint = steamTemp;
     steam();
+  } else {
+    // more than one button pressed
+    multiplebutton = true;
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("");
+    display.println("More than one button pressed!");
+    display.println("");
+    display.print("Nothing will happen..");
+    display.display();
+    reset();
   }
+}
+
+void reset() {
+  setPoint = setPointTemp;
+  brewcounter = 0;
+  aktuelleZeit = 0;
+  bezugsZeit = 0;
+  brewing = false;
+  watering = false;
+  steaming = false;
+  digitalWrite(pinRelayVentil, relayOFF);
+  digitalWrite(pinRelayPumpe, relayOFF);
 }
 
 /********************************************************
@@ -556,6 +584,7 @@ void brew() {
       bezugsZeit = aktuelleZeit - startZeit;
       // Display Brew Time
       if (Display == 2 && !sensorError) {
+        /*
         display.clearDisplay();
         display.setTextSize(9);
         display.setTextColor(WHITE);
@@ -574,28 +603,87 @@ void brew() {
           display.drawBitmap(0,0, enjoy_bits,128, 64, WHITE);
         }
         display.display();
+        */
+        int displayBezugsZeit = totalbrewtime / 1000 - bezugsZeit / 1000;
+        display.clearDisplay();
+
+        if (displayBezugsZeit > 0) {
+          // 1st Dot
+          display.drawPixel(97, 42, WHITE);
+          display.drawPixel(98, 42, WHITE);
+          display.drawPixel(97, 43, WHITE);
+          display.drawPixel(98, 43, WHITE);
+
+          if (brewperiod == 1) {
+            display.drawBitmap(0, 0, barista_bits, 128, 64, WHITE);
+          }
+          if (brewperiod == 2) {
+            display.drawBitmap(0, 0, barista2_bits, 128, 64, WHITE);
+            // 2nd Dot
+            display.drawPixel(101, 42, WHITE);
+            display.drawPixel(102, 42, WHITE);
+            display.drawPixel(101, 43, WHITE);
+            display.drawPixel(102, 43, WHITE);
+          }
+          if (brewperiod == 3) {
+            display.drawBitmap(0, 0, barista3_bits, 128, 64, WHITE);
+            // 2nd Dot
+            display.drawPixel(101, 42, WHITE);
+            display.drawPixel(102, 42, WHITE);
+            display.drawPixel(101, 43, WHITE);
+            display.drawPixel(102, 43, WHITE);
+            // 3rd Dot
+            display.drawPixel(105, 42, WHITE);
+            display.drawPixel(106, 42, WHITE);
+            display.drawPixel(105, 43, WHITE);
+            display.drawPixel(106, 43, WHITE);
+          }
+          display.setTextSize(2);
+          display.setTextColor(WHITE);
+          display.setCursor(59, 47);
+          display.setTextSize(1);
+          display.print("Timer: ");
+          if (displayBezugsZeit < 10) {
+            display.print("0");
+            display.print(displayBezugsZeit);
+          } else {
+            display.print(displayBezugsZeit);
+          }
+          // Temperature bar
+          display.fillRect(9, map(bezugsZeit / 1000, 0, totalbrewtime / 1000, 45, 18), 28, map(bezugsZeit / 1000, 0, totalbrewtime / 1000, 1, 27), WHITE);
+
+        } else if (displayBezugsZeit <= 0) {
+          display.drawBitmap(0,0, enjoy_bits,128, 64, WHITE);
+        }
+
+        display.display();
+        if (brewperiod < 3) {
+          brewperiod = brewperiod + 1;
+        } else {
+          brewperiod = 1;
+        }
       }
     }
 
     totalbrewtime = preinfusion + preinfusionpause + brewtime;
     if (bezugsZeit < totalbrewtime && brewcounter >= 1) {
-      if (bezugsZeit < preinfusion) {
-        DEBUG_println("preinfusion");
-        //digitalWrite(pinRelayVentil, relayON);
-        //digitalWrite(pinRelayPumpe, relayON);
+      if (bezugsZeit < preinfusion && enableRelays) {
+        //DEBUG_println("preinfusion");
+        digitalWrite(pinRelayVentil, relayON);
+        digitalWrite(pinRelayPumpe, relayON);
       }
-      if (bezugsZeit > preinfusion && bezugsZeit < preinfusion + preinfusionpause) {
-        DEBUG_println("Pause");
-        //digitalWrite(pinRelayVentil, relayON);
-        //digitalWrite(pinRelayPumpe, relayOFF);
+      if (bezugsZeit > preinfusion && bezugsZeit < preinfusion + preinfusionpause && enableRelays) {
+        //DEBUG_println("Pause");
+        digitalWrite(pinRelayVentil, relayON);
+        digitalWrite(pinRelayPumpe, relayOFF);
       }
-      if (bezugsZeit > preinfusion + preinfusionpause) {
-        DEBUG_println("Brew");
-        //digitalWrite(pinRelayVentil, relayON);
-        //digitalWrite(pinRelayPumpe, relayON);
+      if (bezugsZeit > preinfusion + preinfusionpause && enableRelays) {
+        //DEBUG_println("Brew");
+        digitalWrite(pinRelayVentil, relayON);
+        digitalWrite(pinRelayPumpe, relayON);
       }
     } else {
-      DEBUG_println("aus");
+      //DEBUG_println("aus");
       digitalWrite(pinRelayVentil, relayOFF);
       digitalWrite(pinRelayPumpe, relayOFF);
     }
@@ -603,7 +691,7 @@ void brew() {
 }
 
 /********************************************************
-    Hot Water - NOT TESTED!!!
+    Hot Water
 ******************************************************/
 void hotwater() {
   if (OnlyPID == 0 && watering == true) {
@@ -613,25 +701,84 @@ void hotwater() {
       {
         previousMillisWater = currentMillisWater;
         display.clearDisplay();
-        if (waterperiod == false) {
-          display.drawBitmap(0,0, water_bits,128, 64, WHITE);
+        // 1st Dot
+        display.drawPixel(116, 42, WHITE);
+        display.drawPixel(117, 42, WHITE);
+        display.drawPixel(116, 43, WHITE);
+        display.drawPixel(117, 43, WHITE);
+
+        if (waterperiod == 1) {
+          if (Input >= setPoint) {
+            display.drawBitmap(0, 0, teatimeready_bits, 128, 64, WHITE);
+          } else {
+            display.drawBitmap(0, 0, teatime_bits, 128, 64, WHITE);
+          }
         }
-        if (waterperiod == true) {
-          display.drawBitmap(0,0, water2_bits,128, 64, WHITE);
+        if (waterperiod == 2) {
+          if (Input >= setPoint) {
+            display.drawBitmap(0, 0, teatimeready2_bits, 128, 64, WHITE);
+          } else {
+            display.drawBitmap(0, 0, teatime2_bits, 128, 64, WHITE);
+          }
+          // 2nd Dot
+          display.drawPixel(120, 42, WHITE);
+          display.drawPixel(121, 42, WHITE);
+          display.drawPixel(120, 43, WHITE);
+          display.drawPixel(121, 43, WHITE);
         }
+        if (waterperiod == 3) {
+          if (Input >= setPoint) {
+            display.drawBitmap(0, 0, teatimeready3_bits, 128, 64, WHITE);
+          } else {
+            display.drawBitmap(0, 0, teatime3_bits, 128, 64, WHITE);
+          }
+          // 2nd Dot
+          display.drawPixel(120, 42, WHITE);
+          display.drawPixel(121, 42, WHITE);
+          display.drawPixel(120, 43, WHITE);
+          display.drawPixel(121, 43, WHITE);
+          // 3rd Dot
+          display.drawPixel(124, 42, WHITE);
+          display.drawPixel(125, 42, WHITE);
+          display.drawPixel(124, 43, WHITE);
+          display.drawPixel(125, 43, WHITE);
+        }
+        display.setTextSize(2);
+        if (Input >= setPoint) {
+          display.setTextColor(BLACK);
+        } else {
+          display.setTextColor(WHITE);
+        }
+        display.setCursor(51, 47);
+        display.setTextSize(1);
+        display.print((int) Input, 1);
+        display.print(" / ");
+        display.print((int) setPoint, 1);
+        display.print(" ");
+        display.print((char)247);
+        display.println("C");
+
+        // Temperature bar
+        display.drawLine(2, 62, map((int) Input, 0, (int) setPoint, 2, 124), 62, WHITE);
+        display.drawLine(2, 63, map((int) Input, 0, (int) setPoint, 2, 124), 63, WHITE);
+
         display.display();
-        waterperiod = !waterperiod;
+        if (waterperiod < 3) {
+          waterperiod = waterperiod + 1;
+        } else {
+          waterperiod = 1;
+        }
       }
     }
-    //digitalWrite(pinRelayVentil, relayFFF);
-    //digitalWrite(pinRelayPumpe, relayON);
+    if (enableRelays) {
+      digitalWrite(pinRelayVentil, relayOFF);
+      digitalWrite(pinRelayPumpe, relayON);
+    }
   }
 }
 
 /********************************************************
-    Steam - NOT TESTED!!!
-    Todo:
-      - Use PID to set boiler temp to blynk value for target temperature
+    Steam
 ******************************************************/
 void steam() {
   if (OnlyPID == 0 && steaming == true) {
@@ -641,18 +788,77 @@ void steam() {
       {
         previousMillisSteam = currentMillisSteam;
         display.clearDisplay();
-        if (steamperiod == false) {
-          display.drawBitmap(0,0, steam_bits,128, 64, WHITE);
+        // 1st Dot
+        display.drawPixel(116, 42, WHITE);
+        display.drawPixel(117, 42, WHITE);
+        display.drawPixel(116, 43, WHITE);
+        display.drawPixel(117, 43, WHITE);
+
+        if (steamperiod == 1) {
+          if (Input >= setPoint) {
+            display.drawBitmap(0, 0, latteartready_bits, 128, 64, WHITE);
+          } else {
+            display.drawBitmap(0, 0, latteart_bits, 128, 64, WHITE);
+          }
         }
-        if (steamperiod == true) {
-          display.drawBitmap(0,0, steam2_bits,128, 64, WHITE);
+        if (steamperiod == 2) {
+          if (Input >= setPoint) {
+            display.drawBitmap(0, 0, latteartready2_bits, 128, 64, WHITE);
+          } else {
+            display.drawBitmap(0, 0, latteart2_bits, 128, 64, WHITE);
+          }
+          // 2nd Dot
+          display.drawPixel(120, 42, WHITE);
+          display.drawPixel(121, 42, WHITE);
+          display.drawPixel(120, 43, WHITE);
+          display.drawPixel(121, 43, WHITE);
         }
+        if (steamperiod == 3) {
+          if (Input >= setPoint) {
+            display.drawBitmap(0, 0, latteartready3_bits, 128, 64, WHITE);
+          } else {
+            display.drawBitmap(0, 0, latteart3_bits, 128, 64, WHITE);
+          }
+          // 2nd Dot
+          display.drawPixel(120, 42, WHITE);
+          display.drawPixel(121, 42, WHITE);
+          display.drawPixel(120, 43, WHITE);
+          display.drawPixel(121, 43, WHITE);
+          // 3rd Dot
+          display.drawPixel(124, 42, WHITE);
+          display.drawPixel(125, 42, WHITE);
+          display.drawPixel(124, 43, WHITE);
+          display.drawPixel(125, 43, WHITE);
+        }
+        display.setTextSize(2);
+        if (Input >= setPoint) {
+          display.setTextColor(BLACK);
+        } else {
+          display.setTextColor(WHITE);
+        }
+        display.setCursor(51, 47);
+        display.setTextSize(1);
+        display.print((int) Input, 1);
+        display.print(" / ");
+        display.print((int) setPoint, 1);
+        display.print(" ");
+        display.print((char)247);
+        display.println("C");
+
+        // Temperature bar
+        display.drawLine(2, 62, map((int) Input, 0, (int) setPoint, 2, 124), 62, WHITE);
+        display.drawLine(2, 63, map((int) Input, 0, (int) setPoint, 2, 124), 63, WHITE);
+
         display.display();
-        steamperiod = !steamperiod;
+        if (steamperiod < 3) {
+          steamperiod = steamperiod + 1;
+        } else {
+          steamperiod = 1;
+        }
       }
     }
-    //digitalWrite(pinRelayVentil, relayFFF);
-    //digitalWrite(pinRelayPumpe, relayON);
+    digitalWrite(pinRelayVentil, relayOFF);
+    digitalWrite(pinRelayPumpe, relayOFF);
   }
 }
 
@@ -729,69 +935,36 @@ void printScreen() {
   }
   if (Display == 2 && !sensorError) {
     display.clearDisplay();
-    display.drawBitmap(0, 0, logo_bits, logo_width, logo_height, WHITE);
-    display.setTextSize(1);
+    display.drawBitmap(2, 2, logo_bits, logo_width, logo_height, WHITE);
+    display.setTextSize(2);
     display.setTextColor(WHITE);
-    display.setCursor(32, 10);
-    display.print("Ist :  ");
+    display.setCursor(40, 12);
     display.print(Input, 1);
-    display.print(" ");
     display.print((char)247);
     display.println("C");
-    display.setCursor(32, 20);
-    display.print("Soll:  ");
+    display.setCursor(40, 35);
     display.print(setPoint, 1);
-    display.print(" ");
     display.print((char)247);
     display.println("C");
-    // display.print("Heizen: ");
-
-    // display.println(" %");
-
+    display.setTextSize(1);
     // Draw heat bar
-    display.drawLine(15, 58, 117, 58, WHITE);
-    display.drawLine(15, 58, 15, 61, WHITE);
+    display.drawLine(28, 58, 117, 58, WHITE);
+    display.drawLine(28, 58, 28, 61, WHITE);
     display.drawLine(117, 58, 117, 61, WHITE);
+    display.drawLine(28, 61, 117, 61, WHITE);
 
-    display.drawLine(16, 59, (Output / 10) + 16, 59, WHITE);
-    display.drawLine(16, 60, (Output / 10) + 16, 60, WHITE);
-    display.drawLine(15, 61, 117, 61, WHITE);
-
+    display.drawLine(29, 59, map((Output), 0, 1000, 29, 116), 59, WHITE);
+    display.drawLine(29, 60, map((Output), 0, 1000, 29, 116), 60, WHITE);
     //draw current temp in icon
-    display.drawLine(9, 48, 9, 58 - (Input / 2), WHITE);
-    display.drawLine(10, 48, 10, 58 - (Input / 2), WHITE);
     display.drawLine(11, 48, 11, 58 - (Input / 2), WHITE);
     display.drawLine(12, 48, 12, 58 - (Input / 2), WHITE);
     display.drawLine(13, 48, 13, 58 - (Input / 2), WHITE);
+    display.drawLine(14, 48, 14, 58 - (Input / 2), WHITE);
+    display.drawLine(15, 48, 15, 58 - (Input / 2), WHITE);
 
     //draw setPoint line
-    display.drawLine(18, 58 - (setPoint / 2), 23, 58 - (setPoint / 2), WHITE);
+    display.drawLine(18, 58 - (setPoint / 2), 29, 58 - (setPoint / 2), WHITE);
 
-    // PID Werte ueber heatbar
-    display.setCursor(40, 50);
-
-    display.print(bPID.GetKp(), 0); // P
-    display.print("|");
-    if (bPID.GetKi() != 0) {
-      display.print(bPID.GetKp() / bPID.GetKi(), 0);;
-    } // I
-    else
-    {
-      display.print("0");
-    }
-    display.print("|");
-    display.println(bPID.GetKd() / bPID.GetKp(), 0); // D
-    display.setCursor(98, 50);
-    display.print(Output / 10, 0);
-    display.print("%");
-
-    // Brew
-    display.setCursor(32, 31);
-    if (Input >= setPoint) {
-      display.print("Ready to brew!");
-    } else {
-      display.print("Heating...");
-    }
     //draw box
     display.drawRoundRect(0, 0, 128, 64, 1, WHITE);
     display.display();
@@ -990,6 +1163,7 @@ void setup() {
           Blynk.syncVirtual(V32);
           Blynk.syncVirtual(V33);
           Blynk.syncVirtual(V34);
+          Blynk.syncVirtual(V40); // Steam Temp
           // Blynk.syncAll();  //sync all values from Blynk server
           // Werte in den eeprom schreiben
           // ini eeprom mit begin
@@ -1008,6 +1182,7 @@ void setup() {
           EEPROM.put(110, aggbTv);
           EEPROM.put(120, brewtimersoftware);
           EEPROM.put(130, brewboarder);
+          EEPROM.put(140, steamTemp);
           // eeprom schließen
           EEPROM.commit();
         }
@@ -1039,6 +1214,7 @@ void setup() {
           EEPROM.get(110, aggbTv);
           EEPROM.get(120, brewtimersoftware);
           EEPROM.get(130, brewboarder);
+          EEPROM.get(140, steamTemp);
         }
         else
         {
@@ -1140,9 +1316,12 @@ void loop() {
   unsigned long startT;
   unsigned long stopT;
 
-  refreshTemp();   //read new temperature values
-  testEmergencyStop();  // test if Temp is to high
+  if (steaming == false) {
+    refreshTemp();   //read new temperature values
+  }
+
   switchDetection();
+  testEmergencyStop();  // test if Temp is to high
 
   //check if PID should run or not. If not, set to manuel and force output to zero
   if (pidON == 0 && pidMode == 1) {
@@ -1153,8 +1332,6 @@ void loop() {
     pidMode = 1;
     bPID.SetMode(pidMode);
   }
-
-
 
   //Sicherheitsabfrage
   if (!sensorError && Input > 0 && !emergencyStop) {
@@ -1181,6 +1358,7 @@ void loop() {
 
     //if brew detected, set PID values
     brewdetection();
+
     if ( millis() - timeBrewdetection  < brewtimersoftware * 1000 && timerBrewdetection == 1) {
       // calc ki, kd
       if (aggbTn != 0) {
@@ -1197,7 +1375,7 @@ void loop() {
 
     sendToBlynk();
 
-    if (brewing == false && watering == false && steaming == false) {
+    if (brewing == false && watering == false && steaming == false && multiplebutton == false) {
       //update display if time interval xpired
       unsigned long currentMillisDisplay = millis();
       if (currentMillisDisplay - previousMillisDisplay >= intervalDisplay) {
@@ -1260,7 +1438,8 @@ void loop() {
       display.setCursor(0, 0);
       display.println("Emergency Stop!");
       display.println("");
-      display.println("Temp > 120");
+      display.print("Temp > ");
+      display.println(esTemp);
       display.print("Temp: ");
       display.println(Input);
       display.print("Resume if Temp < 100");
@@ -1275,7 +1454,8 @@ void loop() {
       u8x8.setCursor(0, 2);
       u8x8.print("               ");
       u8x8.setCursor(0, 1);
-      u8x8.print("Emergency Stop! T>120");
+      u8x8.print("Emergency Stop! T>");
+      u8x8.print(esTemp);
       u8x8.setCursor(0, 2);
       u8x8.print(Input);
     }
