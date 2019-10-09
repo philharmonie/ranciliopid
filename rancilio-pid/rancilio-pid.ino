@@ -38,6 +38,11 @@
 //#include "Arduino.h"
 #include <EEPROM.h>
 
+#define FASTLED_ESP8266_RAW_PIN_ORDER
+#include <FastLED.h>
+#define DATA_PIN 15
+CRGB leds[NUM_LEDS];
+
 const char* bootSubtitle PROGMEM  = "Rancilio Silvia E PID";
 
 /********************************************************
@@ -53,6 +58,7 @@ const int triggerType = TRIGGERTYPE;
 const boolean ota = OTA;
 const int grafana = GRAFANA;
 const bool enableRelays = ENABLERELAYS;
+const bool powerFlusher = POWERFLUSH;
 
 // Wifi
 const char* auth = AUTH;
@@ -182,14 +188,25 @@ Adafruit_SSD1306 display(OLED_RESET);
 unsigned long previousMillistemp;  // initialisation at the end of init()
 unsigned long previousMillisSteam;  // initialisation at the end of init()
 unsigned long previousMillisWater;  // initialisation at the end of init()
+unsigned long previousMillisLed;  // initialisation at the end of init()
 const long intervaltempmestsic = 400;
 const long intervaltempmesds18b20 = 400;
 const long intervalsteam = 500;
 const long intervalwater = 500;
+const long intervalboot = 100;
+unsigned long time_now = 0;
+bool whiteLeds = true;
 int brewperiod = 1;
 int steamperiod = 1;
 int waterperiod = 1;
 int pidMode = 1; //1 = Automatic, 0 = Manual
+
+// LED Brew Animation
+const int speed = 25;
+const int maxBrightness = 255;
+const int minBrightness = 1;
+int animationStep = 0;
+bool ledDirection = false;
 
 const unsigned int windowSize = 1000;
 unsigned int isrCounter = 0;  // counter for ISR
@@ -198,7 +215,6 @@ double Input, Output, setPointTemp;  //
 double previousInput = 0;
 
 double setPoint = SETPOINT;
-double steamTemp = STEAMTEMP;
 double esTemp = ESTEMP;
 double aggKp = AGGKP;
 double aggTn = AGGTN;
@@ -343,10 +359,6 @@ BLYNK_WRITE(V34) {
   brewboarder =  param.asDouble();
 }
 
-BLYNK_WRITE(V40) {
-  steamTemp = param.asDouble();
-}
-
 
 /********************************************************
   Notstop wenn Temp zu hoch
@@ -476,7 +488,7 @@ boolean checkSensor(float tempInput) {
   Each time checkSensor() is called to verify the value.
   If the value is not valid, new data is not stored.
 *****************************************************/
-void refreshTemp() {
+void getTemperature() {
   /********************************************************
     Temp. Request
   ******************************************************/
@@ -521,26 +533,28 @@ void refreshTemp() {
   }
 }
 
-void switchDetection() {
+void machineStateManager() {
+  getTemperature();
   analogPinValue = analogRead(analogPin);
   if (analogPinValue > 1000) {
     // Idle - no button pressed
     multiplebutton = false;
+    ledlight();
     reset();
   } else if (analogPinValue < 20) {
     // Power butotn pressed
+    if (powerFlusher) {
+      flush();
+    }
   } else if (analogPinValue > 530 && analogPinValue < 600) {
     // Brew switch pressed
-    brewing = true;
     brew();
+    //ledlightbrew();
   } else if (analogPinValue > 700 && analogPinValue < 800) {
     // Water button pressed
-    watering = true;
     hotwater();
   } else if (analogPinValue > 850 && analogPinValue < 950) {
     // Steam button pressed
-    steaming = true;
-    setPoint = steamTemp;
     steam();
   } else {
     // more than one button pressed
@@ -574,7 +588,8 @@ void reset() {
     PreInfusion, Brew , if not Only PID
 ******************************************************/
 void brew() {
-  if (OnlyPID == 0 && brewing == true) {
+  brewing = true;
+  if (OnlyPID == 0) {
     unsigned long aktuelleZeit = millis();
     if (brewcounter == 0) {
       startZeit = millis();
@@ -584,26 +599,6 @@ void brew() {
       bezugsZeit = aktuelleZeit - startZeit;
       // Display Brew Time
       if (Display == 2 && !sensorError) {
-        /*
-        display.clearDisplay();
-        display.setTextSize(9);
-        display.setTextColor(WHITE);
-        display.setCursor(10, 0);
-
-        int displayBezugsZeit = totalbrewtime / 1000 - bezugsZeit / 1000;
-        if (displayBezugsZeit > 0) {
-          if (displayBezugsZeit < 10) {
-            display.print("0");
-            display.print(displayBezugsZeit);
-          } else {
-            display.print(displayBezugsZeit);
-          }
-        } else if (displayBezugsZeit <= 0) {
-          display.clearDisplay();
-          display.drawBitmap(0,0, enjoy_bits,128, 64, WHITE);
-        }
-        display.display();
-        */
         int displayBezugsZeit = totalbrewtime / 1000 - bezugsZeit / 1000;
         display.clearDisplay();
 
@@ -694,7 +689,8 @@ void brew() {
     Hot Water
 ******************************************************/
 void hotwater() {
-  if (OnlyPID == 0 && watering == true) {
+  watering = true;
+  if (OnlyPID == 0) {
     if (Display == 2 && !sensorError) {
       unsigned long currentMillisWater = millis();
       if (currentMillisWater - previousMillisWater >= intervalwater)
@@ -781,85 +777,88 @@ void hotwater() {
     Steam
 ******************************************************/
 void steam() {
-  if (OnlyPID == 0 && steaming == true) {
-    if (Display == 2 && !sensorError) {
-      unsigned long currentMillisSteam = millis();
-      if (currentMillisSteam - previousMillisSteam >= intervalsteam)
-      {
-        previousMillisSteam = currentMillisSteam;
-        display.clearDisplay();
-        // 1st Dot
-        display.drawPixel(116, 42, WHITE);
-        display.drawPixel(117, 42, WHITE);
-        display.drawPixel(116, 43, WHITE);
-        display.drawPixel(117, 43, WHITE);
+  steaming = true;
+  setPoint = 150;
+  if (OnlyPID == 0 && !sensorError) {
+    unsigned long currentMillisSteam = millis();
+    if (currentMillisSteam - previousMillisSteam >= intervalsteam)
+    {
+      previousMillisSteam = currentMillisSteam;
+      display.clearDisplay();
+      // 1st Dot
+      display.drawPixel(116, 42, WHITE);
+      display.drawPixel(117, 42, WHITE);
+      display.drawPixel(116, 43, WHITE);
+      display.drawPixel(117, 43, WHITE);
 
-        if (steamperiod == 1) {
-          if (Input >= setPoint) {
-            display.drawBitmap(0, 0, latteartready_bits, 128, 64, WHITE);
-          } else {
-            display.drawBitmap(0, 0, latteart_bits, 128, 64, WHITE);
-          }
-        }
-        if (steamperiod == 2) {
-          if (Input >= setPoint) {
-            display.drawBitmap(0, 0, latteartready2_bits, 128, 64, WHITE);
-          } else {
-            display.drawBitmap(0, 0, latteart2_bits, 128, 64, WHITE);
-          }
-          // 2nd Dot
-          display.drawPixel(120, 42, WHITE);
-          display.drawPixel(121, 42, WHITE);
-          display.drawPixel(120, 43, WHITE);
-          display.drawPixel(121, 43, WHITE);
-        }
-        if (steamperiod == 3) {
-          if (Input >= setPoint) {
-            display.drawBitmap(0, 0, latteartready3_bits, 128, 64, WHITE);
-          } else {
-            display.drawBitmap(0, 0, latteart3_bits, 128, 64, WHITE);
-          }
-          // 2nd Dot
-          display.drawPixel(120, 42, WHITE);
-          display.drawPixel(121, 42, WHITE);
-          display.drawPixel(120, 43, WHITE);
-          display.drawPixel(121, 43, WHITE);
-          // 3rd Dot
-          display.drawPixel(124, 42, WHITE);
-          display.drawPixel(125, 42, WHITE);
-          display.drawPixel(124, 43, WHITE);
-          display.drawPixel(125, 43, WHITE);
-        }
-        display.setTextSize(2);
+      if (steamperiod == 1) {
         if (Input >= setPoint) {
-          display.setTextColor(BLACK);
+          display.drawBitmap(0, 0, latteartready_bits, 128, 64, WHITE);
         } else {
-          display.setTextColor(WHITE);
-        }
-        display.setCursor(51, 47);
-        display.setTextSize(1);
-        display.print((int) Input, 1);
-        display.print(" / ");
-        display.print((int) setPoint, 1);
-        display.print(" ");
-        display.print((char)247);
-        display.println("C");
-
-        // Temperature bar
-        display.drawLine(2, 62, map((int) Input, 0, (int) setPoint, 2, 124), 62, WHITE);
-        display.drawLine(2, 63, map((int) Input, 0, (int) setPoint, 2, 124), 63, WHITE);
-
-        display.display();
-        if (steamperiod < 3) {
-          steamperiod = steamperiod + 1;
-        } else {
-          steamperiod = 1;
+          display.drawBitmap(0, 0, latteart_bits, 128, 64, WHITE);
         }
       }
+      if (steamperiod == 2) {
+        if (Input >= setPoint) {
+          display.drawBitmap(0, 0, latteartready2_bits, 128, 64, WHITE);
+        } else {
+          display.drawBitmap(0, 0, latteart2_bits, 128, 64, WHITE);
+        }
+        // 2nd Dot
+        display.drawPixel(120, 42, WHITE);
+        display.drawPixel(121, 42, WHITE);
+        display.drawPixel(120, 43, WHITE);
+        display.drawPixel(121, 43, WHITE);
+      }
+      if (steamperiod == 3) {
+        if (Input >= setPoint) {
+          display.drawBitmap(0, 0, latteartready3_bits, 128, 64, WHITE);
+        } else {
+          display.drawBitmap(0, 0, latteart3_bits, 128, 64, WHITE);
+        }
+        // 2nd Dot
+        display.drawPixel(120, 42, WHITE);
+        display.drawPixel(121, 42, WHITE);
+        display.drawPixel(120, 43, WHITE);
+        display.drawPixel(121, 43, WHITE);
+        // 3rd Dot
+        display.drawPixel(124, 42, WHITE);
+        display.drawPixel(125, 42, WHITE);
+        display.drawPixel(124, 43, WHITE);
+        display.drawPixel(125, 43, WHITE);
+      }
+      display.setTextSize(2);
+      if (Input >= setPoint) {
+        display.setTextColor(BLACK);
+      } else {
+        display.setTextColor(WHITE);
+      }
+      display.setCursor(51, 47);
+      display.setTextSize(1);
+      display.print((int) Input, 1);
+      display.print(" / ");
+      display.print((int) setPoint, 1);
+      display.print(" ");
+      display.print((char)247);
+      display.println("C");
+
+      // Temperature bar
+      display.drawLine(2, 62, map((int) Input, 0, (int) setPoint, 2, 124), 62, WHITE);
+      display.drawLine(2, 63, map((int) Input, 0, (int) setPoint, 2, 124), 63, WHITE);
+
+      display.display();
+      if (steamperiod < 3) {
+        steamperiod = steamperiod + 1;
+      } else {
+        steamperiod = 1;
+      }
     }
-    digitalWrite(pinRelayVentil, relayOFF);
-    digitalWrite(pinRelayPumpe, relayOFF);
   }
+}
+
+void flush() {
+  digitalWrite(pinRelayVentil, relayON);
+  digitalWrite(pinRelayPumpe, relayON);
 }
 
 /********************************************************
@@ -1084,6 +1083,9 @@ void setup() {
   digitalWrite(pinRelayPumpe, relayOFF);
   digitalWrite(pinRelayHeater, LOW);
 
+  FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);
+  fill_solid(leds, NUM_LEDS, CRGB(255, 255, 255));
+  FastLED.show();
 
   if (Display == 1) {
     /********************************************************
@@ -1163,7 +1165,6 @@ void setup() {
           Blynk.syncVirtual(V32);
           Blynk.syncVirtual(V33);
           Blynk.syncVirtual(V34);
-          Blynk.syncVirtual(V40); // Steam Temp
           // Blynk.syncAll();  //sync all values from Blynk server
           // Werte in den eeprom schreiben
           // ini eeprom mit begin
@@ -1182,7 +1183,6 @@ void setup() {
           EEPROM.put(110, aggbTv);
           EEPROM.put(120, brewtimersoftware);
           EEPROM.put(130, brewboarder);
-          EEPROM.put(140, steamTemp);
           // eeprom schließen
           EEPROM.commit();
         }
@@ -1214,7 +1214,6 @@ void setup() {
           EEPROM.get(110, aggbTv);
           EEPROM.get(120, brewtimersoftware);
           EEPROM.get(130, brewboarder);
-          EEPROM.get(140, steamTemp);
         }
         else
         {
@@ -1291,6 +1290,46 @@ void setup() {
 
 }
 
+void ledlight() {
+  if (Input < setPoint - 1) {
+    fill_solid(leds, NUM_LEDS, CRGB(map(Input, 20, setPoint - 2, 0, 255), 0, map(Input, 20, setPoint - 2, 255, 0)));
+    FastLED.show();
+  } else {
+    fill_solid(leds, NUM_LEDS, CRGB(255, 255, 255));
+    FastLED.show();
+  }
+}
+
+void ledlightbrew() {
+  unsigned long currentLedMillis = millis();
+  if (currentLedMillis - previousMillisLed >= 10) {
+    previousMillisLed = currentLedMillis;
+    // animation
+    setAll(0,0,0);
+    if (!ledDirection) {
+      int brightness = map(animationStep, 0, speed, maxBrightness, minBrightness);
+      fill_solid(leds, NUM_LEDS, CRGB(brightness, brightness, brightness));
+    } else {
+      int brightness = map(animationStep, 0, speed, minBrightness, maxBrightness);
+      fill_solid(leds, NUM_LEDS, CRGB(brightness, brightness, brightness));
+    }
+    FastLED.show();
+    if (++animationStep >= speed) {
+      animationStep = 0;
+      ledDirection = !ledDirection;
+    }
+  }
+}
+
+void setAll(byte red, byte green, byte blue) {
+  for(int Pixel = 0; Pixel < NUM_LEDS; Pixel++ ) {
+    leds[Pixel].r = red;
+    leds[Pixel].g = green;
+    leds[Pixel].b = blue;
+  }
+  FastLED.show();
+}
+
 void loop() {
 
   ArduinoOTA.handle();  // For OTA
@@ -1316,12 +1355,11 @@ void loop() {
   unsigned long startT;
   unsigned long stopT;
 
-  if (steaming == false) {
-    refreshTemp();   //read new temperature values
-  }
+  machineStateManager();
 
-  switchDetection();
-  testEmergencyStop();  // test if Temp is to high
+  if (steaming == false) {
+    testEmergencyStop();  // test if Temp is to high
+  }
 
   //check if PID should run or not. If not, set to manuel and force output to zero
   if (pidON == 0 && pidMode == 1) {

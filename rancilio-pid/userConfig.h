@@ -19,7 +19,9 @@
 #define OTA true             // true=activate update via OTA
 #define PONE 1               // 1 = P_ON_E (normal), 0 = P_ON_M (spezieller PID Modus, ACHTUNG andere Formel zur Berechnung)
 #define GRAFANA 0            // 1=Markus grafana Visualisierung. Zugang notwendig, 0=default, aus
-#define ENABLERELAYS true   // set to false in case of code debugging
+#define ENABLERELAYS true    // set to false in case of code debugging
+#define POWERFLUSH true      // Use the power button as a flusher
+#define NUM_LEDS 10          // Number of leds used for heat up animation and brew light
 
 // Wifi
 #define AUTH "blynkauthcode"
@@ -42,8 +44,7 @@
 
 //PID - Werte für Regelung Offline
 #define SETPOINT 95  // Temperatur Sollwert
-#define STEAMTEMP 120 // Temperatur beim Dampfen
-#define ESTEMP 130 // Temperatur für Emergency Stop
+#define ESTEMP 120 // Temperatur für Emergency Stop
 #define AGGKP 69     // Kp
 #define AGGTN 399    // Tn
 #define AGGTV 0      // Tv
