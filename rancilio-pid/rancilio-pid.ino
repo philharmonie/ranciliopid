@@ -80,10 +80,16 @@ const char* blynkaddress  = BLYNKADDRESS;
 /********************************************************
    Vorab-Konfig
 ******************************************************/
-int pidON = 1 ;                 // 1 = control loop in closed loop
+int pidON = 1;                 // 1 = control loop in closed loop
 int relayON, relayOFF;          // used for relay trigger type. Do not change!
 bool kaltstart = true;       // true = Rancilio started for first time
 bool emergencyStop = false;  // Notstop bei zu hoher Temperatur
+int cleanMode = 0;           // do not swtich to 1
+int cleanCounter = 0;
+int cleanIntervalCounter = 0;
+int cleanInterval = 10;      // How many times to brew during cleaning
+int cleanTime = 10;          // How long to brew during cleaning
+int cleanIntervalPause = 3;    // How long to wait between clean intervals
 
 /********************************************************
    moving average - Brüherkennung
@@ -189,11 +195,13 @@ unsigned long previousMillistemp;  // initialisation at the end of init()
 unsigned long previousMillisSteam;  // initialisation at the end of init()
 unsigned long previousMillisWater;  // initialisation at the end of init()
 unsigned long previousMillisLed;  // initialisation at the end of init()
+unsigned long previousMillisClean;  // initialisation at the end of init()
 const long intervaltempmestsic = 400;
 const long intervaltempmesds18b20 = 400;
 const long intervalsteam = 500;
 const long intervalwater = 500;
 const long intervalboot = 100;
+const long intervalclean = 1000;
 unsigned long time_now = 0;
 bool whiteLeds = true;
 int brewperiod = 1;
@@ -302,28 +310,22 @@ BLYNK_CONNECTED() {
 BLYNK_WRITE(V4) {
   aggKp = param.asDouble();
 }
-
 BLYNK_WRITE(V5) {
   aggTn = param.asDouble();
 }
-
 BLYNK_WRITE(V6) {
   aggTv =  param.asDouble();
 }
-
 BLYNK_WRITE(V7) {
   setPoint = param.asDouble();
   setPointTemp = param.asDouble();
 }
-
 BLYNK_WRITE(V8) {
   brewtime = param.asDouble() * 1000;
 }
-
 BLYNK_WRITE(V9) {
   preinfusion = param.asDouble() * 1000;
 }
-
 BLYNK_WRITE(V10) {
   preinfusionpause = param.asDouble() * 1000;
 }
@@ -333,19 +335,15 @@ BLYNK_WRITE(V11) {
 BLYNK_WRITE(V12) {
   starttemp = param.asDouble();
 }
-BLYNK_WRITE(V13)
-{
+BLYNK_WRITE(V13) {
   pidON = param.asInt();
 }
-BLYNK_WRITE(V14)
-{
+BLYNK_WRITE(V14) {
   startTn = param.asDouble();
 }
-BLYNK_WRITE(V30)
-{
+BLYNK_WRITE(V30) {
   aggbKp = param.asDouble();//
 }
-
 BLYNK_WRITE(V31) {
   aggbTn = param.asDouble();
 }
@@ -358,7 +356,16 @@ BLYNK_WRITE(V33) {
 BLYNK_WRITE(V34) {
   brewboarder =  param.asDouble();
 }
-
+BLYNK_WRITE(V40) {
+  cleanMode = param.asInt();
+}
+BLYNK_WRITE(V41) {
+  cleanTime = param.asInt();
+}
+BLYNK_WRITE(V42) {
+  cleanInterval = param.asInt();
+  cleanInterval = cleanInterval + 1;
+}
 
 /********************************************************
   Notstop wenn Temp zu hoch
@@ -861,6 +868,44 @@ void flush() {
   digitalWrite(pinRelayPumpe, relayON);
 }
 
+void clean() {
+  unsigned long currentCleanMillis = millis();
+  if(currentCleanMillis - previousMillisClean > intervalclean) {
+    previousMillisClean = currentCleanMillis;
+    if (cleanIntervalCounter == cleanInterval || cleanIntervalCounter == 0) {
+      cleanIntervalCounter = cleanIntervalCounter + 1;
+      Blynk.virtualWrite(V43, cleanIntervalCounter);
+      Blynk.syncVirtual(V43);
+    } else if (cleanIntervalCounter <= cleanInterval) {
+      if (cleanCounter < cleanTime) {
+        DEBUG_println("clean");
+        digitalWrite(pinRelayVentil, relayON);
+        digitalWrite(pinRelayPumpe, relayON);
+      } else if (cleanCounter >= cleanTime && cleanCounter < cleanTime + cleanIntervalPause) {
+        DEBUG_println("clean pause");
+        digitalWrite(pinRelayVentil, relayOFF);
+        digitalWrite(pinRelayPumpe, relayOFF);
+      } else {
+        cleanCounter = 0;
+        cleanIntervalCounter = cleanIntervalCounter + 1;
+        Blynk.virtualWrite(V43, cleanIntervalCounter);
+        Blynk.syncVirtual(V43);
+        DEBUG_println("clean stop");
+        digitalWrite(pinRelayVentil, relayOFF);
+        digitalWrite(pinRelayPumpe, relayOFF);
+      }
+    } else {
+      cleanIntervalCounter = 0;
+      cleanMode = 0;
+      Blynk.virtualWrite(V43, cleanIntervalCounter);
+      Blynk.syncVirtual(V43);
+      Blynk.virtualWrite(V40, cleanMode);
+      Blynk.syncVirtual(V40);
+    }
+    cleanCounter = cleanCounter + 1;
+  }
+}
+
 /********************************************************
   Check if Wifi is connected, if not reconnect
 *****************************************************/
@@ -1165,6 +1210,7 @@ void setup() {
           Blynk.syncVirtual(V32);
           Blynk.syncVirtual(V33);
           Blynk.syncVirtual(V34);
+          Blynk.syncVirtual(V40);
           // Blynk.syncAll();  //sync all values from Blynk server
           // Werte in den eeprom schreiben
           // ini eeprom mit begin
@@ -1273,6 +1319,7 @@ void setup() {
   //Initialisation MUST be at the very end of the init(), otherwise the time comparision in loop() will have a big offset
   unsigned long currentTime = millis();
   previousMillistemp = currentTime;
+  previousMillisClean = currentTime;
   windowStartTime = currentTime;
   previousMillisDisplay = currentTime;
   previousMillisBlynk = currentTime;
@@ -1355,7 +1402,12 @@ void loop() {
   unsigned long startT;
   unsigned long stopT;
 
-  machineStateManager();
+  if (cleanMode == 1) {
+    clean();
+  } else {
+    cleanCounter = 0;
+    machineStateManager();
+  }
 
   if (steaming == false) {
     testEmergencyStop();  // test if Temp is to high
